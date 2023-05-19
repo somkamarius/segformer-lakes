@@ -1,12 +1,10 @@
-from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation, SegformerConfig
+from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation, Trainer
 import torch
-from datasets import load_dataset
+from datasets import load_dataset, Image, Dataset
 import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 import rasterio
-
-
 
 def get_seg_overlay(image, seg):
   color_seg = np.zeros((seg.shape[0], seg.shape[1], 3), dtype=np.uint8) # height, width, 3
@@ -20,35 +18,32 @@ def get_seg_overlay(image, seg):
 
   return img
 
-# image = Image.open("0.tif")
-image = rasterio.open("0.tif")
-# plt.imshow(image.read(3))
-# plt.show()
-# image = image.read()
+imageList1 = []
+imageList2 = []
 
-# RESCALE AND NORMALIZE PIXEL VALUES
-# neveikia normalizavimas
-print(image)
-before_image=image.read()
+for i in range(5):
+    print('starting work for image #' + str(i))
+    image = rasterio.open("./images_multiband/" + str(i) + ".tif");
+    before_image=image.read()
+    image = image.read() / 4095 * 255
+    image = (np.rint(image)).astype(int)
+    image = np.clip(image, 0, 255)
+    image1 = np.transpose(image[:3], (1,2,0))
+    image2 = np.transpose(image[-3:], (1,2,0))
+    imageList1.append(image1)
+    imageList2.append(image2)
+    print(image1, image2)
 
-image = image.read()/4095*255
-image = (np.rint(image)).astype(int)
-
-
-# image=image.transpose((1,2,0)) # CHW -> HWC
-image = np.clip(image, 0, 255)
-
-print(image)
-
-# image1 = np.concatenate((image[0:3], np.zeros((3, image.shape[1], image.shape[2]))), axis=0)
-image1 = np.transpose(image[:3], (1,2,0))
-image2 = np.transpose(image[-3:], (1,2,0))
-# image2 = np.concatenate((np.zeros((3, image.shape[1], image.shape[2])), image[3:6]), axis=0)
+##############################################
+# CREATE DATASET FROM IMAGELIST1/2
 
 
 NUM_CHANNEL = 6
 feature_extractor = SegformerImageProcessor.from_pretrained("nvidia/segformer-b4-finetuned-ade-512-512")
 model = SegformerForSemanticSegmentation.from_pretrained("nvidia/segformer-b4-finetuned-ade-512-512")
+
+input_tensors1 = feature_extractor(images=imageList1, return_tensors="pt")
+input_tensors2 = feature_extractor(images=imageList2, return_tensors="pt")
 
 new_config = model.config
 new_config.num_channels=NUM_CHANNEL
@@ -56,8 +51,8 @@ new_model = SegformerForSemanticSegmentation(new_config)
 model.segformer.encoder.block[0][0] = new_model.segformer.encoder.block[0][0]
 
 # inputs = feature_extractor(images=image, return_tensors="pt")
-input_tensors1 = feature_extractor(images=image1, return_tensors="pt")
-input_tensors2 = feature_extractor(images=image2, return_tensors="pt")
+# input_tensors1 = feature_extractor(images=image1, return_tensors="pt")
+# input_tensors2 = feature_extractor(images=image2, return_tensors="pt")
 
 input_tensors = {}
 for key in input_tensors1:
