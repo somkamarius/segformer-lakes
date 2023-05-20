@@ -84,7 +84,7 @@ class SemanticSegmentationDataset(Dataset):
 
 
 root_dir = 'dataset'
-feature_extractor = SegformerImageProcessor.from_pretrained("nvidia/segformer-b4-finetuned-ade-512-512")
+feature_extractor = SegformerImageProcessor.from_pretrained("imadd/segformer-b0-finetuned-segments-water-2")
 
 train_dataset = SemanticSegmentationDataset(root_dir=root_dir, feature_extractor=feature_extractor)
 valid_dataset = SemanticSegmentationDataset(root_dir=root_dir, feature_extractor=feature_extractor, train=False)
@@ -115,7 +115,7 @@ print(mask)
 print(batch["labels"][mask])
 
 ## DEFINE MODEL
-model = SegformerForSemanticSegmentation.from_pretrained("nvidia/segformer-b0-finetuned-ade-512-512", num_labels=1, ignore_mismatched_sizes=True)
+model = SegformerForSemanticSegmentation.from_pretrained("imadd/segformer-b0-finetuned-segments-water-2", num_labels=2, ignore_mismatched_sizes=True)
 new_config = model.config
 new_config.num_channels=NUM_CHANNEL
 # new_config.num_labels=1
@@ -136,7 +136,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
 
 model.train()
-for epoch in range(30):  # loop over the dataset multiple times
+for epoch in range(1):  # loop over the dataset multiple times
     print("Epoch:", epoch)
     for idx, batch in enumerate(tqdm(train_dataloader)):
         # get the inputs;
@@ -172,3 +172,59 @@ for epoch in range(30):  # loop over the dataset multiple times
             print("Loss:", loss.item())
             # print("Mean_iou:", metrics["mean_iou"])
             # print("Mean accuracy:", metrics["mean_accuracy"])
+
+
+## Inference
+image = rasterio.open('dataset/images/training/0.tif')
+image = image.read() / 4095 * 255
+image = (np.rint(image)).astype(int)
+plt.imshow(np.transpose(image[0:3], (1,2,0)))
+plt.show()
+
+image = np.clip(image, 0, 255)
+image1 = np.transpose(image[:3], (1, 2, 0))
+image2 = np.transpose(image[-3:], (1, 2, 0))
+
+
+input_tensors1 = feature_extractor(images=image1, return_tensors="pt")
+input_tensors2 = feature_extractor(images=image2, return_tensors="pt")
+
+encoding = {}
+encoding['pixel_values'] = torch.from_numpy(
+    np.concatenate((input_tensors1.pixel_values, input_tensors2.pixel_values), axis=1))
+# encoding['labels'] = input_tensors2.labels;
+pixel_values = encoding['pixel_values']
+print(pixel_values.shape)
+outputs = model(pixel_values=pixel_values)
+logits = outputs.logits.cpu()
+print(logits.shape)
+
+
+def ade_palette():
+    """ADE20K palette that maps each class to RGB values."""
+    return [[0,0,0], [255, 255, 255]]
+
+
+# First, rescale logits to original image size
+upsampled_logits = nn.functional.interpolate(logits,
+                size=image.shape[-2:], # (height, width)
+                mode='bilinear',
+                align_corners=False)
+
+# Second, apply argmax on the class dimension
+seg = upsampled_logits.argmax(dim=1)[0]
+color_seg = np.zeros((seg.shape[0], seg.shape[1], 3), dtype=np.uint8) # height, width, 3
+palette = np.array(ade_palette())
+for label, color in enumerate(palette):
+    color_seg[seg == label, :] = color
+# Convert to BGR
+color_seg = color_seg[..., ::-1]
+
+# Show image + mask
+img = np.transpose(image[0:3], (1,2,0)) * 0.5 + color_seg * 0.5
+# img = color_seg
+img = img.astype(np.uint8)
+
+plt.figure(figsize=(15, 10))
+plt.imshow(img)
+plt.show()
