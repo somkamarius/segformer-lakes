@@ -1,5 +1,6 @@
 from torch.utils.data import Dataset
 import os
+import evaluate
 from PIL import Image
 from transformers import SegformerImageProcessor, get_scheduler, SegformerForSemanticSegmentation
 import matplotlib.pyplot as plt
@@ -14,6 +15,11 @@ from datasets import load_metric
 import torch
 from torch import nn
 from sklearn.metrics import accuracy_score
+from datetime import datetime
+
+current_time = datetime.now().time()
+print(current_time) #FOR LOG DIFF
+
 
 NUM_CHANNEL = 6
 
@@ -31,7 +37,7 @@ class SemanticSegmentationDataset(Dataset):
         self.feature_extractor = feature_extractor
         self.train = train
 
-        sub_path = "training" if self.train else "validation"
+        sub_path = "training_demo" if self.train else "validation"
         self.img_dir = os.path.join(self.root_dir, "images", sub_path)
         self.ann_dir = os.path.join(self.root_dir, "masks", sub_path)
 
@@ -115,7 +121,7 @@ print(mask)
 print(batch["labels"][mask])
 
 ## DEFINE MODEL
-model = SegformerForSemanticSegmentation.from_pretrained("imadd/segformer-b0-finetuned-segments-water-2", num_labels=2, ignore_mismatched_sizes=True)
+model = SegformerForSemanticSegmentation.from_pretrained("imadd/segformer-b0-finetuned-segments-water-2", num_labels=2)
 new_config = model.config
 new_config.num_channels=NUM_CHANNEL
 # new_config.num_labels=1
@@ -126,7 +132,7 @@ model.segformer.encoder.block[0][0] = new_model.segformer.encoder.block[0][0]
 # model = new_model
 # print('---------------------------------------')
 # print(model.segformer.encoder)
-metric = load_metric("mean_iou")
+mean_iou = evaluate.load("mean_iou")
 
 
 # define optimizer
@@ -160,18 +166,18 @@ for epoch in range(1):  # loop over the dataset multiple times
             predicted = upsampled_logits.argmax(dim=1)
 
             # note that the metric expects predictions + labels as numpy arrays
-            metric.add_batch(predictions=predicted.detach().cpu().numpy(), references=labels.detach().cpu().numpy())
+            mean_iou.add_batch(predictions=predicted.detach().cpu().numpy(), references=labels.detach().cpu().numpy())
 
         # let's print loss and metrics every 100 batches
-        if idx % 100 == 0:
-            # metrics = metric._compute(num_labels=1,
-            #                           ignore_index=255,
-            #                           reduce_labels=False,  # we've already reduced the labels before)
-            #                           )
+        if idx % 10 == 0:
+            metrics = mean_iou.compute(num_labels=1,
+                                      ignore_index=255,
+                                      reduce_labels=False,  # we've already reduced the labels before)
+                                      )
 
             print("Loss:", loss.item())
-            # print("Mean_iou:", metrics["mean_iou"])
-            # print("Mean accuracy:", metrics["mean_accuracy"])
+            print("Mean_iou:", metrics["mean_iou"])
+            print("Mean accuracy:", metrics["mean_accuracy"])
 
 
 ## Inference
@@ -228,3 +234,47 @@ img = img.astype(np.uint8)
 plt.figure(figsize=(15, 10))
 plt.imshow(img)
 plt.show()
+
+
+## SHOW ACTUAL MAP
+mask = np.rint(rasterio.open('dataset/masks/training/0.tif').read() / 255).astype(int)
+mask = np.transpose(mask, (1,2,0))
+plt.imshow(mask, cmap='gray')
+plt.show()
+
+# convert map to NumPy array
+# map = np.array(map)
+# mask[mask == 0] = 255 # background class is replaced by ignore_index
+# mask = mask - 1 # other classes are reduced by one
+# map[map == 254] = 255
+#
+# classes_map = np.unique(mask).tolist()
+# unique_classes = [model.config.id2label[idx] if idx!=255 else None for idx in classes_map]
+# print("Classes in this image:", unique_classes)
+#
+# # create coloured map
+# color_seg = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8) # height, width, 3
+# palette = np.array(ade_palette())
+# for label, color in enumerate(palette):
+#     color_seg[mask == label, :] = color
+# # Convert to BGR
+# color_seg = color_seg[..., ::-1]
+#
+# # Show image + mask
+# img = np.array(image) * 0.5 + color_seg * 0.5
+# img = img.astype(np.uint8)
+#
+# plt.figure(figsize=(15, 10))
+# plt.imshow(img)
+# plt.show()
+# seg.unique()
+
+metrics = mean_iou.compute(predictions=[seg.numpy()], references=[mask], num_labels=2, ignore_index=255)
+print(metrics.keys())
+
+import pandas as pd
+
+# print overall metrics
+for key in list(metrics.keys())[:3]:
+  print(key, metrics[key])
+
