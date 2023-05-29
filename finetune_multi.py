@@ -5,7 +5,7 @@ from PIL import Image
 from transformers import SegformerImageProcessor, get_scheduler, SegformerForSemanticSegmentation
 import matplotlib.pyplot as plt
 import numpy as np
-from PIL import Image
+import PIL
 import rasterio
 from tqdm.auto import tqdm
 from torch.optim import AdamW
@@ -18,10 +18,10 @@ from sklearn.metrics import accuracy_score
 from datetime import datetime
 
 current_time = datetime.now().time()
-print(current_time) #FOR LOG DIFF
-
+print(current_time)  # FOR LOG DIFF
 
 NUM_CHANNEL = 6
+
 
 class SemanticSegmentationDataset(Dataset):
     """Image (semantic) segmentation dataset."""
@@ -37,7 +37,7 @@ class SemanticSegmentationDataset(Dataset):
         self.feature_extractor = feature_extractor
         self.train = train
 
-        sub_path = "training_demo" if self.train else "validation"
+        sub_path = "training" if self.train else "validation"
         self.img_dir = os.path.join(self.root_dir, "images", sub_path)
         self.ann_dir = os.path.join(self.root_dir, "masks", sub_path)
 
@@ -61,19 +61,17 @@ class SemanticSegmentationDataset(Dataset):
         return len(self.images)
 
     def __getitem__(self, idx):
-        #READ IMAGE
+        # READ IMAGE
         image = rasterio.open(os.path.join(self.img_dir, self.images[idx]));
-        # before_image = image.read()
         image = image.read() / 4095 * 255
         image = (np.rint(image)).astype(int)
         image = np.clip(image, 0, 255)
         image1 = np.transpose(image[:3], (1, 2, 0))
         image2 = np.transpose(image[-3:], (1, 2, 0))
-        #READ MAP
-        segmentation_map = np.rint(rasterio.open(os.path.join(self.ann_dir, self.annotations[idx])).read() / 255).astype(int);
 
-        # randomly crop + pad both image and segmentation map to same size
-        # encoded_inputs = self.feature_extractor(image, segmentation_map, return_tensors="pt")
+        # READ MAP
+        segmentation_map = np.rint(
+            rasterio.open(os.path.join(self.ann_dir, self.annotations[idx])).read() / 255).astype(int);
 
         input_tensors1 = self.feature_extractor(images=image1, segmentation_maps=segmentation_map, return_tensors="pt")
         input_tensors2 = self.feature_extractor(images=image2, segmentation_maps=segmentation_map, return_tensors="pt")
@@ -108,32 +106,24 @@ print(encoded_inputs["labels"].squeeze().unique())
 
 from torch.utils.data import DataLoader
 
-train_dataloader = DataLoader(train_dataset, batch_size=1, shuffle=True)
+train_dataloader = DataLoader(train_dataset, batch_size=16, shuffle=True)
 valid_dataloader = DataLoader(valid_dataset, batch_size=1)
 
 batch = next(iter(train_dataloader))
-for k,v in batch.items():
-  print(k, v.shape)
+for k, v in batch.items():
+    print(k, v.shape)
 
-print(batch["labels"].shape)
 mask = (batch["labels"] != 255)
-print(mask)
-print(batch["labels"][mask])
 
 ## DEFINE MODEL
 model = SegformerForSemanticSegmentation.from_pretrained("imadd/segformer-b0-finetuned-segments-water-2", num_labels=2)
 new_config = model.config
-new_config.num_channels=NUM_CHANNEL
-# new_config.num_labels=1
+new_config.num_channels = NUM_CHANNEL
 new_model = SegformerForSemanticSegmentation(new_config)
-# print(model.segformer.encoder)
 model.segformer.encoder.patch_embeddings = new_model.segformer.encoder.patch_embeddings
 model.segformer.encoder.block[0][0] = new_model.segformer.encoder.block[0][0]
-# model = new_model
-# print('---------------------------------------')
-# print(model.segformer.encoder)
+# model.load_state_dict(torch.load('./checkpoints/model-15-23:33:23.808260.pt')['model_state_dict'])
 mean_iou = evaluate.load("mean_iou")
-
 
 # define optimizer
 optimizer = torch.optim.AdamW(model.parameters(), lr=0.00006)
@@ -141,8 +131,10 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=0.00006)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
 
+epoch_counter = 0
+
 model.train()
-for epoch in range(1):  # loop over the dataset multiple times
+for epoch in range(15):  # loop over the dataset multiple times
     print("Epoch:", epoch)
     for idx, batch in enumerate(tqdm(train_dataloader)):
         # get the inputs;
@@ -164,117 +156,107 @@ for epoch in range(1):  # loop over the dataset multiple times
             upsampled_logits = nn.functional.interpolate(logits, size=labels.shape[-2:], mode="bilinear",
                                                          align_corners=False)
             predicted = upsampled_logits.argmax(dim=1)
-
-            # note that the metric expects predictions + labels as numpy arrays
             mean_iou.add_batch(predictions=predicted.detach().cpu().numpy(), references=labels.detach().cpu().numpy())
 
-        # let's print loss and metrics every 100 batches
-        if idx % 10 == 0:
+        if idx % 5 == 0:
             metrics = mean_iou.compute(num_labels=1,
                                       ignore_index=255,
-                                      reduce_labels=False,  # we've already reduced the labels before)
+                                      reduce_labels=False,  # we've already reduced the labels before
                                       )
 
             print("Loss:", loss.item())
             print("Mean_iou:", metrics["mean_iou"])
             print("Mean accuracy:", metrics["mean_accuracy"])
 
+    print(f"epoch {epoch_counter} loss:", loss.item())
+    print(f"epoch {epoch_counter} mean_iou:", metrics["mean_iou"])
+    print(f"epoch {epoch_counter} mean accuracy:", metrics["mean_accuracy"])
 
-## Inference
-image = rasterio.open('dataset/images/training/0.tif')
-image = image.read() / 4095 * 255
-image = (np.rint(image)).astype(int)
-plt.imshow(np.transpose(image[0:3], (1,2,0)))
-plt.show()
-
-image = np.clip(image, 0, 255)
-image1 = np.transpose(image[:3], (1, 2, 0))
-image2 = np.transpose(image[-3:], (1, 2, 0))
+    epoch_counter = epoch_counter + 1
 
 
-input_tensors1 = feature_extractor(images=image1, return_tensors="pt")
-input_tensors2 = feature_extractor(images=image2, return_tensors="pt")
+# SAVE MODEL CHECKPOINT
 
-encoding = {}
-encoding['pixel_values'] = torch.from_numpy(
-    np.concatenate((input_tensors1.pixel_values, input_tensors2.pixel_values), axis=1))
-# encoding['labels'] = input_tensors2.labels;
-pixel_values = encoding['pixel_values']
-print(pixel_values.shape)
-outputs = model(pixel_values=pixel_values)
-logits = outputs.logits.cpu()
-print(logits.shape)
+PATH = f"checkpoints/model-{epoch_counter}-{current_time}.pt"
+torch.save({
+            'epoch': epoch_counter,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss': loss.item(),
+            }, PATH)
+
+# Set the path to the folder containing the TIFF images
+folder_path = 'dataset/ready_for_segmentation/demo'
+
+# Get a list of TIFF files in the folder
+tiff_files = [file for file in os.listdir(folder_path)]
+
+# Initialize an empty list to store the images
+ready_for_segmentation = []
+
+# Loop through each TIFF file
+for file in tiff_files:
+    # Construct the full file path
+    file_path = os.path.join(folder_path, file)
+
+    # Open the TIFF file using rasterio
+    with rasterio.open(file_path) as src:
+        # Read the image data
+        image = src.read() / 4095 * 255
+        image = (np.rint(image)).astype(int)
+        # Append the image to the list
+        ready_for_segmentation.append(image)
+        print(len(ready_for_segmentation))
+for prediction_image in ready_for_segmentation:
+    ## Inference
+
+    image = np.clip(prediction_image, 0, 255)
+    image1 = np.transpose(image[:3], (1, 2, 0))
+    image2 = np.transpose(image[-3:], (1, 2, 0))
+
+    input_tensors1 = feature_extractor(images=image1, return_tensors="pt")
+    input_tensors2 = feature_extractor(images=image2, return_tensors="pt")
+
+    encoding = {}
+    encoding['pixel_values'] = torch.from_numpy(
+        np.concatenate((input_tensors1.pixel_values, input_tensors2.pixel_values), axis=1))
+    pixel_values = encoding['pixel_values']
+    outputs = model(pixel_values=pixel_values)
+    logits = outputs.logits.cpu()
+
+    def ade_palette():
+        """ADE20K palette that maps each class to RGB values."""
+        return [[0, 0, 0], [255, 255, 255]]
 
 
-def ade_palette():
-    """ADE20K palette that maps each class to RGB values."""
-    return [[0,0,0], [255, 255, 255]]
+    # First, rescale logits to original image size
+    upsampled_logits = nn.functional.interpolate(logits,
+                                                 size=image.shape[-2:],  # (height, width)
+                                                 mode='bilinear',
+                                                 align_corners=False)
 
+    # Second, apply argmax on the class dimension
+    seg = upsampled_logits.argmax(dim=1)[0]
+    color_seg = np.zeros((seg.shape[0], seg.shape[1], 3), dtype=np.uint8)  # height, width, 3
+    palette = np.array(ade_palette())
+    for label, color in enumerate(palette):
+        color_seg[seg == label, :] = color
+    # Convert to BGR
+    color_seg = color_seg[..., ::-1]
 
-# First, rescale logits to original image size
-upsampled_logits = nn.functional.interpolate(logits,
-                size=image.shape[-2:], # (height, width)
-                mode='bilinear',
-                align_corners=False)
+    # Show image + mask
+    img = np.transpose(image[0:3], (1, 2, 0)) * 0.5 + color_seg * 0.5
+    # img = color_seg
+    img = img.astype(np.uint8)
 
-# Second, apply argmax on the class dimension
-seg = upsampled_logits.argmax(dim=1)[0]
-color_seg = np.zeros((seg.shape[0], seg.shape[1], 3), dtype=np.uint8) # height, width, 3
-palette = np.array(ade_palette())
-for label, color in enumerate(palette):
-    color_seg[seg == label, :] = color
-# Convert to BGR
-color_seg = color_seg[..., ::-1]
+    plt.figure(figsize=(15, 10))
+    plt.imshow(img)
+    plt.show()
 
-# Show image + mask
-img = np.transpose(image[0:3], (1,2,0)) * 0.5 + color_seg * 0.5
-# img = color_seg
-img = img.astype(np.uint8)
-
-plt.figure(figsize=(15, 10))
-plt.imshow(img)
-plt.show()
-
-
-## SHOW ACTUAL MAP
-mask = np.rint(rasterio.open('dataset/masks/training/0.tif').read() / 255).astype(int)
-mask = np.transpose(mask, (1,2,0))
-plt.imshow(mask, cmap='gray')
-plt.show()
-
-# convert map to NumPy array
-# map = np.array(map)
-# mask[mask == 0] = 255 # background class is replaced by ignore_index
-# mask = mask - 1 # other classes are reduced by one
-# map[map == 254] = 255
-#
-# classes_map = np.unique(mask).tolist()
-# unique_classes = [model.config.id2label[idx] if idx!=255 else None for idx in classes_map]
-# print("Classes in this image:", unique_classes)
-#
-# # create coloured map
-# color_seg = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8) # height, width, 3
-# palette = np.array(ade_palette())
-# for label, color in enumerate(palette):
-#     color_seg[mask == label, :] = color
-# # Convert to BGR
-# color_seg = color_seg[..., ::-1]
-#
-# # Show image + mask
-# img = np.array(image) * 0.5 + color_seg * 0.5
-# img = img.astype(np.uint8)
-#
-# plt.figure(figsize=(15, 10))
-# plt.imshow(img)
-# plt.show()
-# seg.unique()
-
-metrics = mean_iou.compute(predictions=[seg.numpy()], references=[mask], num_labels=2, ignore_index=255)
-print(metrics.keys())
-
-import pandas as pd
-
-# print overall metrics
-for key in list(metrics.keys())[:3]:
-  print(key, metrics[key])
-
+    color_seg=color_seg.mean(axis=2)
+    print(color_seg)
+    print(color_seg.shape)
+    color_seg = (np.rint(color_seg)).astype(int)
+    print(np.unique(color_seg, return_counts=True))
+    plt.imshow(color_seg)
+    plt.show()
